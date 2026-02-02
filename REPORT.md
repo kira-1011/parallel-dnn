@@ -212,11 +212,16 @@ After 2(N-1) steps, all processes have the complete sum.
 
 | Component | Specification |
 |-----------|---------------|
-| **Hardware** | Single multi-core machine (12 CPU cores) |
-| **OS** | Windows 10/11 |
+| **CPU** | Intel Core i5-12450H (12th Gen) |
+| **Physical Cores** | 8 cores |
+| **Logical Processors** | 12 threads (Hyper-Threading enabled) |
+| **Base Clock** | 2.50 GHz |
+| **Cache** | L1: 704 KB, L2: 7 MB, L3: 12 MB |
+| **Memory** | 15.7 GB DDR |
+| **OS** | Windows 11 |
 | **Programming Model** | Distributed-memory (message-passing) |
 | **Framework** | PyTorch Distributed with Gloo backend |
-| **Process Count** | 1 to 12 worker processes |
+| **Process Count Tested** | 1, 2, 4, 6, 8, 10, 12 worker processes |
 
 #### Hardware vs. Programming Model Distinction
 
@@ -250,9 +255,16 @@ After 2(N-1) steps, all processes have the complete sum.
 
 | Component | Specification |
 |-----------|---------------|
-| CPU | 12-core processor |
-| Memory | Shared memory |
-| Storage | Local SSD |
+| **CPU** | Intel Core i5-12450H (12th Gen, Alder Lake) |
+| **Architecture** | Hybrid (Performance + Efficiency cores) |
+| **Physical Cores** | 8 cores |
+| **Logical Processors** | 12 threads (Hyper-Threading) |
+| **Base Frequency** | 2.50 GHz |
+| **Cache Hierarchy** | L1: 704 KB, L2: 7 MB, L3: 12 MB |
+| **Memory** | 15.7 GB DDR |
+| **Storage** | NVMe SSD |
+
+**Note on Core Count**: The i5-12450H uses Intel's hybrid architecture with a mix of Performance cores (P-cores) and Efficiency cores (E-cores). The 12 logical processors allow us to test parallel scaling from 1 to 12 workers.
 
 ### 4.2 Software Environment
 
@@ -463,7 +475,7 @@ This project successfully demonstrated data-parallel training of a CNN on CIFAR-
 
 ### Key Achievements
 
-1. **Achieved 1.94× speedup** using 6-8 workers on a 12-core CPU system
+1. **Achieved 1.94× speedup** using 6-8 workers on an Intel i5-12450H (8 cores, 12 threads)
 2. **Verified correctness** through consistent loss convergence and accuracy across all configurations
 3. **Identified optimal parallelism** at 6-8 workers for this workload
 4. **Understood limitations** including communication overhead and diminishing returns
