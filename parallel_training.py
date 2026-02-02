@@ -15,6 +15,7 @@ import argparse
 import os
 import time
 import json
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,17 @@ import torchvision.transforms as transforms
 RANDOM_SEED = 42
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+VERBOSE = True  # Enable verbose logging to see parallel execution
+
+
+# ============================================================================
+# Logging Helper
+# ============================================================================
+def log(rank, message, force=False):
+    """Print timestamped log message with worker rank."""
+    if VERBOSE or force:
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[{timestamp}] [Worker {rank}] {message}", flush=True)
 
 
 # ============================================================================
@@ -72,8 +84,6 @@ class SimpleCNN(nn.Module):
 def get_datasets():
     """Load CIFAR-10 datasets with appropriate transforms."""
     train_transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(32, padding=4),
         transforms.ToTensor(),
         transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
     ])
@@ -94,7 +104,7 @@ def get_datasets():
 
 
 def create_distributed_dataloaders(train_dataset, test_dataset, batch_size, 
-                                   rank, world_size, num_workers=2):
+                                   rank, world_size, num_workers=0):
     """Create DataLoaders with DistributedSampler."""
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=rank, shuffle=True
@@ -118,14 +128,17 @@ def create_distributed_dataloaders(train_dataset, test_dataset, batch_size,
 # ============================================================================
 # Training Functions
 # ============================================================================
-def train_one_epoch(model, train_loader, optimizer, criterion, device):
+def train_one_epoch(model, train_loader, optimizer, criterion, device, rank, epoch):
     """Train for one epoch."""
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
+    num_batches = len(train_loader)
+    
+    log(rank, f"Epoch {epoch+1}: Starting training on {num_batches} batches")
 
-    for inputs, targets in train_loader:
+    for batch_idx, (inputs, targets) in enumerate(train_loader):
         inputs, targets = inputs.to(device), targets.to(device)
 
         optimizer.zero_grad()
@@ -138,17 +151,25 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device):
         _, predicted = outputs.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
+        
+        # Log progress every 25% of batches
+        if (batch_idx + 1) % max(1, num_batches // 4) == 0 or batch_idx == 0:
+            log(rank, f"Epoch {epoch+1}: Batch {batch_idx+1}/{num_batches} "
+                      f"({100*(batch_idx+1)/num_batches:.0f}%) - Loss: {loss.item():.4f}")
 
+    log(rank, f"Epoch {epoch+1}: Training complete - processed {total} samples")
     return running_loss / len(train_loader), 100. * correct / total
 
 
-def evaluate(model, test_loader, criterion, device):
+def evaluate(model, test_loader, criterion, device, rank, epoch):
     """Evaluate model."""
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
 
+    log(rank, f"Epoch {epoch+1}: Starting evaluation")
+    
     with torch.no_grad():
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
@@ -160,11 +181,15 @@ def evaluate(model, test_loader, criterion, device):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
+    log(rank, f"Epoch {epoch+1}: Local evaluation done - {correct}/{total} correct")
+    
     # Aggregate across workers
     if dist.is_initialized():
+        log(rank, f"Epoch {epoch+1}: Starting AllReduce to aggregate metrics...")
         metrics = torch.tensor([correct, total, running_loss], device=device)
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         correct, total, running_loss = metrics.tolist()
+        log(rank, f"Epoch {epoch+1}: AllReduce complete - global {int(correct)}/{int(total)} correct")
 
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     return running_loss / len(test_loader) / world_size, 100. * correct / total
@@ -175,31 +200,44 @@ def evaluate(model, test_loader, criterion, device):
 # ============================================================================
 def train_worker(rank, world_size, args):
     """Main training function for each worker."""
+    log(rank, f"Worker starting - PID: {os.getpid()}", force=True)
+    
     # Setup distributed
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
-    os.environ['USE_LIBUV'] = "0"
-    init_method="env://"
 
-    dist.init_process_group(backend='gloo', init_method=init_method, rank=rank, world_size=world_size)
+    log(rank, "Initializing process group...")
+    dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
+    log(rank, f"Process group initialized - {world_size} workers connected", force=True)
 
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     device = torch.device('cpu')
+    log(rank, f"Using device: {device}")
 
     # Create model
     torch.manual_seed(RANDOM_SEED)
     model = SimpleCNN().to(device)
+    log(rank, "Model created, wrapping with DDP...")
     model = DDP(model)
+    log(rank, "DDP wrapper applied - model parameters will be synchronized")
 
     # Data
+    log(rank, "Loading datasets...")
     train_dataset, test_dataset = get_datasets()
     train_loader, test_loader, train_sampler = create_distributed_dataloaders(
         train_dataset, test_dataset, args.batch_size, rank, world_size
     )
+    samples_per_worker = len(train_loader) * args.batch_size
+    log(rank, f"Data loaded - {samples_per_worker} training samples assigned to this worker", force=True)
 
     # Training setup
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
+
+    # Synchronization barrier before training
+    log(rank, "Waiting at barrier for all workers to be ready...")
+    dist.barrier()
+    log(rank, "All workers synchronized - starting training!", force=True)
 
     # Training loop
     results = {'epoch_times': [], 'train_losses': [], 'test_accuracies': []}
@@ -209,8 +247,14 @@ def train_worker(rank, world_size, args):
         epoch_start = time.perf_counter()
         train_sampler.set_epoch(epoch)
 
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, rank, epoch)
+        
+        # Synchronization point after training (implicit in DDP, explicit barrier for logging)
+        log(rank, f"Epoch {epoch+1}: Waiting for all workers to finish training...")
+        dist.barrier()
+        log(rank, f"Epoch {epoch+1}: All workers finished training - starting evaluation")
+        
+        test_loss, test_acc = evaluate(model, test_loader, criterion, device, rank, epoch)
 
         epoch_time = time.perf_counter() - epoch_start
         results['epoch_times'].append(epoch_time)
@@ -218,12 +262,16 @@ def train_worker(rank, world_size, args):
         results['test_accuracies'].append(test_acc)
 
         if rank == 0:
-            print(f"Epoch [{epoch+1:2d}/{args.epochs}] | "
+            print(f"\n{'='*70}")
+            print(f"Epoch [{epoch+1:2d}/{args.epochs}] SUMMARY | "
                   f"Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
                   f"Test Acc: {test_acc:.2f}% | Time: {epoch_time:.2f}s")
+            print(f"{'='*70}\n")
 
     total_time = time.perf_counter() - total_start
 
+    log(rank, f"Training complete - total time: {total_time:.2f}s", force=True)
+    
     if rank == 0:
         print(f"\nTraining completed in {total_time:.2f}s")
         results['total_time'] = total_time
@@ -234,17 +282,27 @@ def train_worker(rank, world_size, args):
             json.dump(results, f, indent=2)
         print(f"Results saved to parallel_results_{world_size}workers.json")
 
+    log(rank, "Cleaning up process group...")
     dist.destroy_process_group()
+    log(rank, "Worker finished", force=True)
 
 
 def main():
+    global VERBOSE
     parser = argparse.ArgumentParser(description='Parallel CNN Training on CIFAR-10')
-    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--world-size', type=int, default=4, 
                         help='Number of workers (only used with mp.spawn)')
+    parser.add_argument('--verbose', '-v', action='store_true', default=True,
+                        help='Enable verbose logging to see parallel execution')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Disable verbose logging')
     args = parser.parse_args()
+    
+    # Set verbose mode
+    VERBOSE = args.verbose and not args.quiet
 
     # Check if launched via torchrun
     if 'RANK' in os.environ:
