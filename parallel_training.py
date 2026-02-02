@@ -30,18 +30,13 @@ import torchvision
 import torchvision.transforms as transforms
 
 
-# ============================================================================
 # Configuration
-# ============================================================================
 RANDOM_SEED = 42
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 VERBOSE = True  # Enable verbose logging to see parallel execution
 
 
-# ============================================================================
-# Logging Helper
-# ============================================================================
 def log(rank, message, force=False):
     """Print timestamped log message with worker rank."""
     if VERBOSE or force:
@@ -49,9 +44,6 @@ def log(rank, message, force=False):
         print(f"[{timestamp}] [Worker {rank}] {message}", flush=True)
 
 
-# ============================================================================
-# Model Definition
-# ============================================================================
 class SimpleCNN(nn.Module):
     """Simple CNN for CIFAR-10 classification."""
 
@@ -78,9 +70,6 @@ class SimpleCNN(nn.Module):
         return x
 
 
-# ============================================================================
-# Data Loading
-# ============================================================================
 def get_datasets():
     """Load CIFAR-10 datasets with appropriate transforms."""
     train_transform = transforms.Compose([
@@ -125,9 +114,6 @@ def create_distributed_dataloaders(train_dataset, test_dataset, batch_size,
     return train_loader, test_loader, train_sampler
 
 
-# ============================================================================
-# Training Functions
-# ============================================================================
 def train_one_epoch(model, train_loader, optimizer, criterion, device, rank, epoch):
     """Train for one epoch."""
     model.train()
@@ -195,9 +181,6 @@ def evaluate(model, test_loader, criterion, device, rank, epoch):
     return running_loss / len(test_loader) / world_size, 100. * correct / total
 
 
-# ============================================================================
-# Main Training Function
-# ============================================================================
 def train_worker(rank, world_size, args):
     """Main training function for each worker."""
     log(rank, f"Worker starting - PID: {os.getpid()}", force=True)
@@ -210,7 +193,6 @@ def train_worker(rank, world_size, args):
     dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
     log(rank, f"Process group initialized - {world_size} workers connected", force=True)
 
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     device = torch.device('cpu')
     log(rank, f"Using device: {device}")
 
